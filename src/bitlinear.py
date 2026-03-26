@@ -184,6 +184,7 @@ class BitLinear(nn.Module):
             New BitLinear module with copied weights.
         """
         layer = cls(linear.in_features, linear.out_features)
+        layer = layer.to(device=linear.weight.device, dtype=linear.weight.dtype)
         with torch.no_grad():
             layer.weight.copy_(linear.weight)
         return layer
