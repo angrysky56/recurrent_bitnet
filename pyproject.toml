@@ -7,7 +7,7 @@ license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1.0",
-    "transformers>=4.51.0",
+    "transformers @ git+https://github.com/huggingface/transformers.git",
     "datasets>=3.0.0",
     "accelerate>=1.0.0",
     "matplotlib>=3.7.0",

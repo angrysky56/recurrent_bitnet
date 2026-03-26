@@ -30,6 +30,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +379,7 @@ class DistillationTrainer:
         total_tokens = 0
 
         with torch.no_grad():
+            pbar = tqdm(total=num_samples, desc="Evaluating", leave=False)
             for i, batch in enumerate(dataloader):
                 if i >= num_samples:
                     break
@@ -392,6 +394,8 @@ class DistillationTrainer:
                 )
                 total_loss += loss.item()
                 total_tokens += s_labels.numel()
+                pbar.update(1)
+            pbar.close()
 
         self.student.train()
 
@@ -563,6 +567,7 @@ def compute_model_perplexity(
     total_tokens = 0
 
     with torch.no_grad():
+        pbar = tqdm(total=num_samples, desc="Measuring Perplexity", leave=True)
         for i, batch in enumerate(dataloader):
             if i >= num_samples:
                 break
@@ -577,6 +582,8 @@ def compute_model_perplexity(
             )
             total_loss += loss.item()
             total_tokens += labels.numel()
+            pbar.update(1)
+        pbar.close()
 
     avg_loss = total_loss / max(1, total_tokens)
     return {
