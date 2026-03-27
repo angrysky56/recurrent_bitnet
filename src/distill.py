@@ -365,6 +365,7 @@ class DistillationTrainer:
         self,
         dataloader: Any,
         num_samples: int | None = None,
+        tokenizer: Any = None,
     ) -> dict[str, float]:
         """Evaluate model perplexity on a dataset.
 
@@ -387,15 +388,16 @@ class DistillationTrainer:
                 outputs = self.student(input_ids)
                 s_logits = outputs.logits[..., :-1, :].contiguous()
                 s_labels = input_ids[..., 1:].contiguous()
+                pad_id = tokenizer.pad_token_id if hasattr(tokenizer, 'pad_token_id') else -100
                 loss = F.cross_entropy(
                     s_logits.view(-1, s_logits.size(-1)),
                     s_labels.view(-1),
-                    ignore_index=self.tokenizer.pad_token_id,
+                    ignore_index=pad_id,
                     reduction="sum",
                 )
                 total_loss += loss.item()
                 # Only count non-padding tokens
-                total_tokens += (s_labels != self.tokenizer.pad_token_id).sum().item()
+                total_tokens += (s_labels != pad_id).sum().item()
                 pbar.update(1)
             pbar.close()
 
@@ -469,7 +471,7 @@ class DistillationTrainer:
         """Plot training loss curves (inline for notebooks)."""
         import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        _, axes = plt.subplots(1, 3, figsize=(18, 5))
 
         # Total loss.
         axes[0].plot(self.losses, alpha=0.3, color="steelblue")

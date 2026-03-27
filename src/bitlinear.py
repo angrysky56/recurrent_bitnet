@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class RMSNorm(nn.Module):
@@ -163,8 +162,8 @@ class BitLinear(nn.Module):
         x_int, x_scale = quantize_activations_int8(x)
         x_effective = x + (x_int * x_scale / 127.0 - x).detach()
 
-        # 4. Matrix multiplication.
-        return F.linear(x_effective, w_effective)
+        # 4. Matrix multiplication (equivalent to F.linear without bias).
+        return x_effective @ w_effective.t()
 
     # ------------------------------------------------------------------
     # Conversion utilities
