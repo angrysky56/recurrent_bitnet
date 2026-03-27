@@ -390,10 +390,12 @@ class DistillationTrainer:
                 loss = F.cross_entropy(
                     s_logits.view(-1, s_logits.size(-1)),
                     s_labels.view(-1),
+                    ignore_index=self.tokenizer.pad_token_id,
                     reduction="sum",
                 )
                 total_loss += loss.item()
-                total_tokens += s_labels.numel()
+                # Only count non-padding tokens
+                total_tokens += (s_labels != self.tokenizer.pad_token_id).sum().item()
                 pbar.update(1)
             pbar.close()
 
@@ -548,6 +550,7 @@ def create_dataloader(
 def compute_model_perplexity(
     model: nn.Module,
     dataloader: Any,
+    tokenizer: Any = None,
     num_samples: int = 50,
     device: str | torch.device = "cuda",
 ) -> dict[str, float]:
@@ -578,10 +581,11 @@ def compute_model_perplexity(
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 labels.view(-1),
+                ignore_index=tokenizer.pad_token_id if hasattr(tokenizer, 'pad_token_id') else -100,
                 reduction="sum",
             )
             total_loss += loss.item()
-            total_tokens += labels.numel()
+            total_tokens += (labels != (tokenizer.pad_token_id if hasattr(tokenizer, 'pad_token_id') else -100)).sum().item()
             pbar.update(1)
         pbar.close()
 
