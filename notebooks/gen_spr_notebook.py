@@ -128,6 +128,33 @@ code("""class RMSNorm(nn.Module):
         norm = x_fp32.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
         return (x_fp32 * norm).to(x.dtype) * self.weight
 
+
+class SubspaceRMSNorm(nn.Module):
+    \"\"\"
+    RMSNorm that normalizes content, context, and conjunctive subspaces independently.
+    
+    Standard RMSNorm creates subtle non-linear coupling: a spike in context dims
+    suppresses content dim magnitudes. This variant eliminates that coupling.
+    
+    Toggle via config.spr_isolated_norm. When False, falls back to standard RMSNorm.
+    \"\"\"
+    def __init__(self, d_model: int, d_content: int, d_context: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.d_content = d_content
+        self.d_context = d_context
+        self.weight = nn.Parameter(torch.ones(d_model))
+
+    def _norm_subspace(self, x):
+        x_fp32 = x.float()
+        return (x_fp32 * x_fp32.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()).to(x.dtype)
+
+    def forward(self, x):
+        xc = self._norm_subspace(x[:, :, :self.d_content])
+        xx = self._norm_subspace(x[:, :, self.d_content:self.d_content+self.d_context])
+        xb = self._norm_subspace(x[:, :, self.d_content+self.d_context:])
+        return torch.cat([xc, xx, xb], dim=-1) * self.weight
+
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int):
         super().__init__()
@@ -155,11 +182,12 @@ class SwiGLUFFN(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int):
+    def __init__(self, d_model: int, n_heads: int, d_ff: int, norm_cls=None):
         super().__init__()
-        self.norm1 = RMSNorm(d_model)
+        norm_cls = norm_cls or (lambda d: RMSNorm(d))
+        self.norm1 = norm_cls(d_model)
         self.attn = MultiHeadSelfAttention(d_model, n_heads)
-        self.norm2 = RMSNorm(d_model)
+        self.norm2 = norm_cls(d_model)
         self.ffn = SwiGLUFFN(d_model, d_ff)
 
     def forward(self, x, mask=None):
@@ -266,9 +294,15 @@ class SPRReasoningCore(nn.Module):
         self.d_context = int(config.d_model * config.spr_context_ratio)
         self.d_conjunctive = config.d_model - self.d_content - self.d_context
         
+        # Norm factory: isolated subspace norms if configured, else standard
+        if hasattr(config, 'spr_isolated_norm') and config.spr_isolated_norm:
+            norm_cls = lambda d: SubspaceRMSNorm(d, self.d_content, self.d_context)
+        else:
+            norm_cls = None  # default RMSNorm
+        
         # Standard transformer blocks (operate on full d_model — no architectural change)
         self.blocks = nn.ModuleList([
-            TransformerBlock(config.d_model, config.n_heads, config.d_ff)
+            TransformerBlock(config.d_model, config.n_heads, config.d_ff, norm_cls=norm_cls)
             for _ in range(config.reasoning_blocks)
         ])
         
@@ -353,6 +387,7 @@ class ModelConfig:
     spr_content_ratio: float = 0.85     # ~88% content neurons context-invariant
     spr_context_ratio: float = 0.12     # ~12% context encoding
     # conjunctive = 1 - content - context ≈ 0.03 (~2.3% hippocampal conjunctive)
+    spr_isolated_norm: bool = False     # Ablation: normalize subspaces independently
     # --- Experiment mode ---
     use_spr: bool = True                # Toggle between baseline and SPR""")
 
@@ -402,6 +437,7 @@ eff_depth = config.encoder_blocks + config.reasoning_blocks * config.max_recurre
 
 print(f"✅ RecurrentBitNet V2-SPR")
 print(f"   Mode:            {'SPR' if config.use_spr else 'Baseline'}")
+print(f"   Isolated norm:   {config.spr_isolated_norm}")
 print(f"   Unique params:   {num_params:,}")
 print(f"   Binding net:     {binding_params:,} params ({binding_params/num_params*100:.3f}%)")
 print(f"   Effective depth: {eff_depth} layers (R={config.max_recurrence})")
@@ -822,16 +858,22 @@ code("""    # 8. Save (local)
             ifc = probe_results['iter_from_content']
             ifc_ch = probe_results['iter_from_content_chance']
             ifx = probe_results['iter_from_context']
+            # Success = large gap between context (should be high) and content (should be low)
+            separation = ifx - ifc
             print(f"     Iter from CONTENT: {ifc:.3f} (chance={ifc_ch:.3f}) "
-                  f"{'✅ NEAR CHANCE' if ifc < ifc_ch * 1.5 else '⚠️ ABOVE CHANCE'}")
+                  f"{'✅ LOW' if ifc < ifc_ch * 3 else '⚠️ LEAKING'}")
             print(f"     Iter from CONTEXT: {ifx:.3f} (chance={ifc_ch:.3f}) "
-                  f"{'✅ HIGH' if ifx > ifc_ch * 2 else '⚠️ LOW'}")
+                  f"{'✅ HIGH' if ifx > ifc_ch * 2 else '⚠️ WEAK'}")
+            print(f"     Separation gap:    {separation:.3f} "
+                  f"{'✅ STRONG' if separation > 0.3 else '⚠️ NARROW' if separation > 0.1 else '❌ WEAK'}")
         if 'token_from_content' in probe_results:
             tfc = probe_results['token_from_content']
             tfx = probe_results['token_from_context']
+            tok_sep = tfc - tfx
             print(f"     Token from CONTENT: {tfc:.3f} (chance=0.01)")
             print(f"     Token from CONTEXT: {tfx:.3f} (chance=0.01) "
-                  f"{'✅ NEAR CHANCE' if tfx < 0.03 else '⚠️ ABOVE CHANCE'}")
+                  f"{'✅ LOW' if tfx < tfc * 0.5 else '⚠️ LEAKING'}")
+            print(f"     Token separation:   {tok_sep:.3f}")
         model.train()
 
 total_time = time.time() - run_start
@@ -968,23 +1010,29 @@ code("""if probe_log:
     
     # Summary interpretation
     last = probe_log[-1]
-    if 'iter_from_content' in last:
+    if 'iter_from_content' in last and 'iter_from_context' in last:
         ifc = last['iter_from_content']
+        ifx = last['iter_from_context']
         chance = last['iter_from_content_chance']
+        separation = ifx - ifc
         ratio = ifc / chance if chance > 0 else float('inf')
-        if ratio < 1.5:
+        if separation > 0.3 and ratio < 3.0:
             print(f"\\n✅ CONTENT-CONTEXT SEPARATION CONFIRMED")
-            print(f"   Iteration signal in content dims: {ifc:.4f} ({ratio:.1f}x chance)")
-            print(f"   The content subspace is largely invariant to iteration context.")
-            print(f"   This matches Bausch et al. (88% content neurons context-invariant)")
-        elif ratio < 3.0:
+            print(f"   Iter from content: {ifc:.4f} ({ratio:.1f}x chance)")
+            print(f"   Iter from context: {ifx:.4f}")
+            print(f"   Separation gap:    {separation:.4f}")
+            print(f"   Content subspace is largely protected from iteration context.")
+            print(f"   Matches Bausch et al. prediction (88% content invariance).")
+        elif separation > 0.1:
             print(f"\\n⚠️ PARTIAL SEPARATION")
-            print(f"   Iteration signal in content dims: {ifc:.4f} ({ratio:.1f}x chance)")
-            print(f"   Some leakage through attention — investigate head specialization.")
+            print(f"   Separation gap: {separation:.4f}")
+            print(f"   Some cross-subspace leakage via attention (expected).")
+            print(f"   Consider spr_isolated_norm=True to test if RMSNorm coupling is the cause.")
         else:
             print(f"\\n❌ WEAK SEPARATION")
-            print(f"   Iteration signal in content dims: {ifc:.4f} ({ratio:.1f}x chance)")
-            print(f"   Consider stronger partition enforcement or different ratios.")
+            print(f"   Separation gap: {separation:.4f}")
+            print(f"   Subspace partition may need stronger enforcement.")
+            print(f"   Ablations: (1) spr_isolated_norm=True, (2) different ratios.")
     
     # Save probe log
     probe_path = os.path.join(DRIVE_CKPT_DIR, 'probe_results.json')

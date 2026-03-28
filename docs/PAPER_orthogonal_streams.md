@@ -283,7 +283,9 @@ Train two matched models — a standard RecurrentBitNet V2 and an SPR variant �
 (c) Token identity from context dimensions (should be at chance for SPR)
 (d) Iteration number from content dimensions (should be at chance for SPR)
 
-The cross-subspace probes (c, d) constitute the key test. In a standard model, both should be above chance (entanglement). In SPR, both should be at or near chance (orthogonality preserved).
+The cross-subspace probes (c, d) constitute the key test. In a standard model, both should be well above chance (entanglement). In SPR, both should show a **massive reduction** relative to the baseline — though not necessarily at chance, because standard multi-head attention computes Value projections across the full d_model, creating some cross-subspace information flow through the out-projection. This attention-mediated flow is the analog of biological co-activation and is *desirable* — the point is that the *injection* of iteration context is confined, not that attention is prevented from learning cross-subspace patterns. A baseline showing 80% iteration→content accuracy that drops to 15-25% under SPR (while maintaining or improving perplexity) constitutes strong evidence for the hypothesis.
+
+**Note on normalization coupling**: Standard RMSNorm normalizes by the root-mean-square of the *entire* d_model vector. This creates a subtle non-linear coupling between subspaces — a large activation spike in context dimensions will suppress content dimension magnitudes. If initial probes show more cross-subspace leakage than expected, a Subspace-Isolated RMSNorm (normalizing each subspace independently before concatenation) can be introduced as an ablation to quantify how much of the observed leakage is due to attention-mediated co-activation (desirable) versus normalization-mediated coupling (undesirable).
 
 ### 7.2 Attention Head Specialization
 
