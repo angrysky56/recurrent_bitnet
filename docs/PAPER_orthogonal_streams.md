@@ -342,7 +342,9 @@ The Drosophila memory consolidation work (Francés et al., Nature 2026) provides
 
 This AND gate operates on *independent* signals — the training-induced sensor reset and the metabolic sugar detection are computed by separate neural circuits that converge only at the consolidation decision point. This is architecturally identical to SPR's conjunctive subspace: two mostly-independent streams (content and context) producing a joint decision through sparse convergence.
 
-The implication for recurrent reasoning: the decision to *consolidate* a reasoning step (commit it to the context state for future iterations) should depend on an AND gate between content quality (did this step produce useful intermediate results?) and context appropriateness (is this the right point in the reasoning process to consolidate?). Implementing this as a gating mechanism in the conjunctive subspace — rather than as the blunt loss-improvement check proposed in the original "metabolic AND gate" — would more faithfully capture the biological principle.
+The implication for recurrent reasoning: the decision to *consolidate* a reasoning step (commit it to the context state for future iterations) should depend on an AND gate between content quality (did this step produce useful intermediate results?) and context appropriateness (is this the right point in the reasoning process to consolidate?). In SPR, this maps directly to the `halt_scorer` reading from the conjunctive subspace — the *only* location where content and context have been jointly represented. A halt signal from content-only or context-only dimensions would be a single-input gate, not an AND gate. By confining the halt decision to the conjunctive subspace, we ensure that both streams must jointly agree before reasoning terminates.
+
+During training, we regularize the halt scorer against a geometric prior p(halt at step r) = (1-λ)^r · λ via KL divergence, following the PonderNet framework (Banino et al., 2021). This teaches the model to learn *when* to stop rather than relying on a fixed curriculum. During inference, the halt scorer can dynamically truncate recurrence — skipping unnecessary iterations when the conjunctive state is confident, saving compute proportional to the number of skipped steps.
 
 ### 8.4 Connection to RYS Neuroanatomy
 
@@ -460,15 +462,25 @@ class SubspacePartitionedReasoningCore(nn.Module):
         nn.init.zeros_(self.binding_net[-1].weight)
         nn.init.zeros_(self.binding_net[-1].bias)
         
+        # Conjunctive halt scorer (Drosophila AND gate analog)
+        # Reads ONLY from the conjunctive subspace — the sole location where
+        # content quality AND context state have been jointly represented.
+        # Prevents content-only or context-only signals from triggering halt.
         self.halt_scorer = nn.Sequential(
-            nn.Linear(config.d_model, 1), nn.Sigmoid()
+            nn.Linear(self.d_conjunctive, self.d_conjunctive),
+            nn.GELU(),
+            nn.Linear(self.d_conjunctive, 1),
+            nn.Sigmoid(),
         )
+        nn.init.zeros_(self.halt_scorer[-2].weight)
+        nn.init.zeros_(self.halt_scorer[-2].bias)
     
     def forward(self, x, mask=None, R=None, recurrence_dropout=0.0):
         if R is None:
             R = self.iteration_embeddings.size(0)
         
         iter_outputs = []
+        halt_probs = []
 ```
 
 ```python
@@ -499,8 +511,18 @@ class SubspacePartitionedReasoningCore(nn.Module):
                 x = block(x, mask)
             
             iter_outputs.append(x)
+            
+            # 5. Conjunctive halt scoring (AND gate)
+            #    Reads ONLY from conjunctive dims — where content+context converge
+            x_conj = x[:, :, self.d_content+self.d_context:]
+            halt_prob = self.halt_scorer(x_conj).mean()
+            halt_probs.append(halt_prob)
+            
+            # During inference: halt when conjunctive state is confident
+            if not self.training and halt_prob.item() > 0.8 and r > 0:
+                break
         
-        return x, iter_outputs
+        return x, iter_outputs, halt_probs
 ```
 
 

@@ -1,22 +1,43 @@
 #!/usr/bin/env python3
 """Generate RecurrentBitNet V2-SPR comparative notebook."""
+
 import json
 
 cells = []
 
+
 def md(source):
-    cells.append({"cell_type": "markdown", "id": f"md_{len(cells)}", "metadata": {}, "source": source.split("\n")})
+    cells.append(
+        {
+            "cell_type": "markdown",
+            "id": f"md_{len(cells)}",
+            "metadata": {},
+            "source": source.split("\n"),
+        }
+    )
+
 
 def code(source):
     src_lines = [line + "\n" for line in source.split("\n")]
     if src_lines:
         src_lines[-1] = src_lines[-1].rstrip("\n")
-    cells.append({"cell_type": "code", "execution_count": None, "id": f"code_{len(cells)}", "metadata": {}, "outputs": [], "source": src_lines})
+    cells.append(
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "id": f"code_{len(cells)}",
+            "metadata": {},
+            "outputs": [],
+            "source": src_lines,
+        }
+    )
+
 
 # ═══════════════════════════════════════════════════════
 # CELL 1: Title
 # ═══════════════════════════════════════════════════════
-md("""# RecurrentBitNet V2-SPR — Subspace-Partitioned Reasoning Experiment
+md(
+    """# RecurrentBitNet V2-SPR — Subspace-Partitioned Reasoning Experiment
 
 **Hypothesis**: Content and context representations should occupy orthogonal subspaces,
 interacting through sparse co-activation rather than dense entanglement.
@@ -34,7 +55,8 @@ The ONLY difference is how iteration context enters the reasoning core.
 3. **Subspace probing** (can we decode iteration from content dims? token from context dims?)
 
 **Paper**: "Orthogonal Streams: Content-Context Separation as an Architectural Prior for Language Models"
-**Evidence sources**: Bausch et al. Nature 2026, Kerce & Fox arXiv:2603.07461, Qwen3.5""")
+**Evidence sources**: Bausch et al. Nature 2026, Kerce & Fox arXiv:2603.07461, Qwen3.5"""
+)
 
 # ═══════════════════════════════════════════════════════
 # CELL 2: Setup
@@ -132,10 +154,10 @@ code("""class RMSNorm(nn.Module):
 class SubspaceRMSNorm(nn.Module):
     \"\"\"
     RMSNorm that normalizes content, context, and conjunctive subspaces independently.
-    
+
     Standard RMSNorm creates subtle non-linear coupling: a spike in context dims
     suppresses content dim magnitudes. This variant eliminates that coupling.
-    
+
     Toggle via config.spr_isolated_norm. When False, falls back to standard RMSNorm.
     \"\"\"
     def __init__(self, d_model: int, d_content: int, d_context: int, eps: float = 1e-6):
@@ -269,7 +291,7 @@ class BaselineReasoningCore(nn.Module):
             for block in self.blocks:
                 x = block(x, mask)
             iter_outputs.append(x)
-        return x, iter_outputs""")
+        return x, iter_outputs, []  # No halt probs for baseline""")
 
 code("""# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SPR: Subspace-Partitioned Reasoning Core (THIS PAPER)
@@ -277,12 +299,12 @@ code("""# ━━━━━━━━━━━━━━━━━━━━━━━�
 class SPRReasoningCore(nn.Module):
     \"\"\"
     Subspace-Partitioned Reasoning: iteration context confined to context subspace.
-    
+
     Biological basis: Bausch et al. Nature 2026
       - 88% of content neurons invariant to context
       - 63.5% of context neurons invariant to content
       - ~2.3% conjunctive neurons in hippocampus
-    
+
     Engineering basis: Kerce & Fox arXiv:2603.07461
       - Dual-stream separation costs only 2.5% performance
       - Standard transformers dissolve token identity by layer 3
@@ -293,25 +315,25 @@ class SPRReasoningCore(nn.Module):
         self.d_content = int(config.d_model * config.spr_content_ratio)
         self.d_context = int(config.d_model * config.spr_context_ratio)
         self.d_conjunctive = config.d_model - self.d_content - self.d_context
-        
+
         # Norm factory: isolated subspace norms if configured, else standard
         if hasattr(config, 'spr_isolated_norm') and config.spr_isolated_norm:
             norm_cls = lambda d: SubspaceRMSNorm(d, self.d_content, self.d_context)
         else:
             norm_cls = None  # default RMSNorm
-        
+
         # Standard transformer blocks (operate on full d_model — no architectural change)
         self.blocks = nn.ModuleList([
             TransformerBlock(config.d_model, config.n_heads, config.d_ff, norm_cls=norm_cls)
             for _ in range(config.reasoning_blocks)
         ])
-        
+
         # Iteration embeddings — ONLY d_context dimensions (the key difference)
         self.iteration_embeddings = nn.Parameter(
             torch.randn(config.max_recurrence, 1, 1, self.d_context) * 0.02
-        )""")
+        )
 
-code("""        # Conjunctive binding network (small — matches ~2.3% hippocampal ratio)
+        # Conjunctive binding network (small — matches ~2.3% hippocampal ratio)
         self.binding_net = nn.Sequential(
             nn.Linear(self.d_content + self.d_context, self.d_conjunctive * 4),
             nn.GELU(),
@@ -320,46 +342,68 @@ code("""        # Conjunctive binding network (small — matches ~2.3% hippocamp
         # Zero-init output so binding is learned gradually (starts as identity)
         nn.init.zeros_(self.binding_net[-1].weight)
         nn.init.zeros_(self.binding_net[-1].bias)
-        
+
+        # --- CONJUNCTIVE HALT SCORER (The Drosophila AND Gate) ---
+        # Reads ONLY from the conjunctive subspace — the sole location where
+        # content quality AND context state have been jointly represented.
+        # This prevents content-only or context-only signals from triggering halt.
+        # Biological analog: Drosophila LTM consolidation requires BOTH
+        # fructose sensor sensitivity (context) AND sugar ingestion (content).
+        # (Francés et al., Nature 2026)
         self.halt_scorer = nn.Sequential(
-            nn.Linear(config.d_model, 1), nn.Sigmoid()
+            nn.Linear(self.d_conjunctive, self.d_conjunctive),
+            nn.GELU(),
+            nn.Linear(self.d_conjunctive, 1),
+            nn.Sigmoid(),
         )
+        # Initialize to output ~0.5 (uncertain) — let training decide
+        nn.init.zeros_(self.halt_scorer[-2].weight)
+        nn.init.zeros_(self.halt_scorer[-2].bias)
 
     def forward(self, x, mask=None, R=None, recurrence_dropout=0.0):
         if R is None:
             R = self.iteration_embeddings.size(0)
         iter_outputs = []
-        
+        halt_probs = []
+
         for r in range(R):
             if self.training and recurrence_dropout > 0 and r > 0:
                 if torch.rand(1).item() < recurrence_dropout:
                     continue
-            
+
             # === SUBSPACE PARTITIONING ===
             x_content = x[:, :, :self.d_content]                                # ~85%
             x_context = x[:, :, self.d_content:self.d_content+self.d_context]   # ~12%
-            x_bind    = x[:, :, self.d_content+self.d_context:]                 # ~3%""")
+            x_bind    = x[:, :, self.d_content+self.d_context:]                 # ~3%
 
-code("""            # 1. Inject iteration context ONLY into context subspace
+            # 1. Inject iteration context ONLY into context subspace
             if r < self.iteration_embeddings.size(0):
                 x_context = x_context + self.iteration_embeddings[r]
-            
+
             # 2. Conjunctive binding: small network reads both, writes to bind dims
             binding_input = torch.cat([x_content, x_context], dim=-1)
             x_bind = x_bind + self.binding_net(binding_input)
-            
+
             # 3. Reassemble (content dims NEVER saw the iteration embedding)
             x = torch.cat([x_content, x_context, x_bind], dim=-1)
-            
+
             # 4. Standard transformer processing — attention sees ALL dimensions
-            #    This is the co-activation mechanism: attention heads can learn
-            #    cross-subspace patterns without additive contamination
             for block in self.blocks:
                 x = block(x, mask)
-            
+
             iter_outputs.append(x)
-        
-        return x, iter_outputs
+
+            # 5. Conjunctive halt scoring — reads ONLY from conjunctive dims
+            #    This is the AND gate: halt only when content+context jointly agree
+            x_conj_post = x[:, :, self.d_content+self.d_context:]  # (B, L, d_conj)
+            halt_prob = self.halt_scorer(x_conj_post).mean()       # scalar
+            halt_probs.append(halt_prob)
+
+            # During inference: actually halt if confident (threshold = 0.8)
+            if not self.training and halt_prob.item() > 0.8 and r > 0:
+                break
+
+        return x, iter_outputs, halt_probs
 
 print("✅ Baseline + SPR reasoning cores defined")
 print(f"   SPR subspace allocation: content/context/conjunctive")""")
@@ -411,7 +455,7 @@ code("""class RecurrentBitNetV2SPR(nn.Module):
         B, L = idx.size()
         x = self.token_emb(idx)
         x = self.encoder(x)
-        x, iter_outputs = self.reasoning_core(
+        x, iter_outputs, halt_probs = self.reasoning_core(
             x, R=R,
             recurrence_dropout=self.config.recurrence_dropout if self.training else 0.0
         )
@@ -421,7 +465,7 @@ code("""class RecurrentBitNetV2SPR(nn.Module):
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-        return logits, loss, iter_outputs""")
+        return logits, loss, iter_outputs, halt_probs""")
 
 code("""# ━━━ Instantiate SPR model ━━━
 config = ModelConfig(use_spr=True)
@@ -571,28 +615,28 @@ code("""@torch.no_grad()
 def run_subspace_probes(model, num_batches=20, R=None):
     \"\"\"
     Measure content-context separation via linear probing.
-    
+
     Returns dict with probe accuracies for each subspace × target combination.
     \"\"\"
     model.eval()
     core = model.reasoning_core
     d_c = core.d_content
     d_x = core.d_context
-    
+
     if R is None:
         R = model.config.max_recurrence
-    
+
     # Collect hidden states from the reasoning core's last iteration
     all_content_hidden = []
     all_context_hidden = []
     all_token_ids = []
-    all_iter_labels = []""")
+    all_iter_labels = []
 
-code("""    for _ in range(num_batches):
+    for _ in range(num_batches):
         idx, _ = get_batch()
         x = model.token_emb(idx)
         x = model.encoder(x)
-        
+
         # Run reasoning core manually to get per-iteration hidden states
         for r in range(R):
             x_pre = x.clone()
@@ -611,33 +655,33 @@ code("""    for _ in range(num_batches):
                 # Baseline path
                 if r < core.iteration_embeddings.size(0):
                     x = x + core.iteration_embeddings[r]
-            
+
             for block in core.blocks:
                 x = block(x)
-            
+
             # Sample hidden states (take every 64th token to keep memory manageable)
             h = x[:, ::64, :].reshape(-1, x.size(-1))  # (B*L//64, d_model)
             t = idx[:, ::64].reshape(-1)                 # token ids
-            
+
             all_content_hidden.append(h[:, :d_c].cpu())
             all_context_hidden.append(h[:, d_c:d_c+d_x].cpu())
             all_token_ids.append(t.cpu())
-            all_iter_labels.append(torch.full((h.size(0),), r, dtype=torch.long))""")
+            all_iter_labels.append(torch.full((h.size(0),), r, dtype=torch.long))
 
-code("""    # Concatenate all collected data
+    # Concatenate all collected data
     content_h = torch.cat(all_content_hidden, dim=0)    # (N, d_content)
     context_h = torch.cat(all_context_hidden, dim=0)    # (N, d_context)
     token_ids = torch.cat(all_token_ids, dim=0)         # (N,)
     iter_labels = torch.cat(all_iter_labels, dim=0)     # (N,)
-    
+
     N = content_h.size(0)
     # Use 80/20 train/test split
     perm = torch.randperm(N)
     split = int(0.8 * N)
     train_idx, test_idx = perm[:split], perm[split:]
-    
+
     results = {}
-    
+
     # --- Probe: Iteration from Content dims (should be LOW for SPR) ---
     if R > 1 and iter_labels.max() > 0:
         # Simple linear probe via closed-form least-squares on one-hot targets
@@ -645,7 +689,7 @@ code("""    # Concatenate all collected data
         y_tr = iter_labels[train_idx]
         X_te = content_h[test_idx].float()
         y_te = iter_labels[test_idx]
-        
+
         # Fit: W = (X^T X + λI)^{-1} X^T Y_onehot
         num_classes = R
         Y_oh = F.one_hot(y_tr, num_classes).float()
@@ -656,9 +700,9 @@ code("""    # Concatenate all collected data
         acc = (preds == y_te).float().mean().item()
         chance = 1.0 / num_classes
         results['iter_from_content'] = acc
-        results['iter_from_content_chance'] = chance""")
+        results['iter_from_content_chance'] = chance
 
-code("""        # --- Probe: Iteration from Context dims (should be HIGH) ---
+        # --- Probe: Iteration from Context dims (should be HIGH) ---
         X_tr_ctx = context_h[train_idx].float()
         X_te_ctx = context_h[test_idx].float()
         XtX_ctx = X_tr_ctx.T @ X_tr_ctx + lam * torch.eye(X_tr_ctx.size(1))
@@ -667,34 +711,34 @@ code("""        # --- Probe: Iteration from Context dims (should be HIGH) ---
         acc_ctx = (preds_ctx == y_te).float().mean().item()
         results['iter_from_context'] = acc_ctx
         results['iter_from_context_chance'] = chance
-    
+
     # --- Probe: Token identity from Content dims (should be HIGH) ---
     # Use top-100 most frequent tokens for tractability
     token_counts = torch.bincount(token_ids, minlength=1)
     top_tokens = token_counts.argsort(descending=True)[:100]
     tok_mask_tr = torch.isin(token_ids[train_idx], top_tokens)
     tok_mask_te = torch.isin(token_ids[test_idx], top_tokens)
-    
+
     if tok_mask_tr.sum() > 100 and tok_mask_te.sum() > 50:
         # Remap token IDs to 0..99
         tok_map = {t.item(): i for i, t in enumerate(top_tokens)}
-        
+
         def remap(ids, mask):
             return torch.tensor([tok_map[t.item()] for t in ids[mask]])
-        
+
         X_tr_tok = content_h[train_idx][tok_mask_tr].float()
         y_tr_tok = remap(token_ids[train_idx], tok_mask_tr)
         X_te_tok = content_h[test_idx][tok_mask_te].float()
         y_te_tok = remap(token_ids[test_idx], tok_mask_te)
-        
+
         Y_oh_tok = F.one_hot(y_tr_tok, 100).float()
         XtX_tok = X_tr_tok.T @ X_tr_tok + lam * torch.eye(X_tr_tok.size(1))
         W_tok = torch.linalg.solve(XtX_tok, X_tr_tok.T @ Y_oh_tok)
         preds_tok = (X_te_tok @ W_tok).argmax(dim=-1)
         results['token_from_content'] = (preds_tok == y_te_tok).float().mean().item()
-        results['token_from_content_chance'] = 0.01  # 1/100""")
+        results['token_from_content_chance'] = 0.01  # 1/100
 
-code("""        # --- Probe: Token identity from Context dims (should be LOW for SPR) ---
+        # --- Probe: Token identity from Context dims (should be LOW for SPR) ---
         X_tr_tok_ctx = context_h[train_idx][tok_mask_tr].float()
         X_te_tok_ctx = context_h[test_idx][tok_mask_te].float()
         XtX_tok_ctx = X_tr_tok_ctx.T @ X_tr_tok_ctx + lam * torch.eye(X_tr_tok_ctx.size(1))
@@ -702,7 +746,7 @@ code("""        # --- Probe: Token identity from Context dims (should be LOW for
         preds_tok_ctx = (X_te_tok_ctx @ W_tok_ctx).argmax(dim=-1)
         results['token_from_context'] = (preds_tok_ctx == y_te_tok).float().mean().item()
         results['token_from_context_chance'] = 0.01
-    
+
     model.train()
     return results
 
@@ -721,7 +765,7 @@ def evaluate(model, num_batches=50, R=None):
     for _ in tqdm(range(num_batches), desc=f"Eval (R={R})", leave=False):
         idx, targets = get_batch()
         with torch.amp.autocast('cuda', enabled=(DEVICE == 'cuda'), dtype=torch.bfloat16):
-            logits, _, _ = model(idx, targets, R=R)
+            logits, _, _, _ = model(idx, targets, R=R)
         logits_flat = logits.view(-1, logits.size(-1))
         targets_flat = targets.view(-1)
         mask = targets_flat != PAD_ID
@@ -764,7 +808,8 @@ Identical to V2 training loop, plus:
 - **Subspace probes** every 10K steps measuring content-context separation
 - **Per-iteration loss delta** tracking (diagnostic, not gated)""")
 
-code("""model.train()
+code(
+    """model.train()
 print("🚀 Starting V2-SPR training...")
 print(f"   Mode: {'SPR' if config.use_spr else 'Baseline'}")
 print(f"   Steps {start_step+1:,} → {TOTAL_STEPS:,}")
@@ -787,7 +832,7 @@ for step in range(start_step + 1, TOTAL_STEPS + 1):
 
     # 3. Forward
     with torch.amp.autocast('cuda', enabled=(DEVICE == 'cuda'), dtype=torch.bfloat16):
-        logits, base_loss, iter_outputs = model(idx, targets, R=R)
+        logits, base_loss, iter_outputs, halt_probs = model(idx, targets, R=R)
 
         # 4. Auxiliary loss (identical to V2)
         aux_loss = torch.tensor(0.0, device=DEVICE)
@@ -798,9 +843,26 @@ for step in range(start_step + 1, TOTAL_STEPS + 1):
                 step_logits.view(-1, step_logits.size(-1)), targets.view(-1)
             )
             aux_loss = aux_loss + (AUX_DECAY ** (R - (r + 1))) * step_loss
-        total_loss = base_loss + aux_loss""")
 
-code("""    # 5. Backward
+        # 5. Halting regularization (PonderNet-style geometric prior)
+        #    Teaches the halt_scorer to output increasing halt probability
+        #    at later iterations, with a geometric prior p(halt at r) = (1-λ)^r * λ
+        halt_loss = torch.tensor(0.0, device=DEVICE)
+        if halt_probs and len(halt_probs) > 1:
+            HALT_LAMBDA = 0.3  # geometric prior: ~30% chance of halting per step
+            for r, hp in enumerate(halt_probs):
+                # Geometric prior: p(halt at step r) = (1-λ)^r * λ
+                prior_halt = HALT_LAMBDA * ((1 - HALT_LAMBDA) ** r)
+                # KL(prior || predicted) for each step
+                halt_loss = halt_loss + (
+                    prior_halt * torch.log((prior_halt + 1e-8) / (hp + 1e-8)) +
+                    (1 - prior_halt) * torch.log((1 - prior_halt + 1e-8) / (1 - hp + 1e-8))
+                )
+            halt_loss = halt_loss * 0.01  # small weight — don't dominate LM loss
+
+        total_loss = base_loss + aux_loss + halt_loss
+
+    # 5. Backward
     optimizer.zero_grad()
     scaler.scale(total_loss).backward()
     scaler.unscale_(optimizer)
@@ -826,11 +888,12 @@ code("""    # 5. Backward
         remaining = (TOTAL_STEPS - step) * (elapsed / LOG_EVERY)
         eta_h = remaining / 3600
         print(f"Step {step:>7,}/{TOTAL_STEPS:,} | Loss {avg_loss:.4f} | R={R} | "
-              f"LR {lr:.2e} | {ms_per_step:.0f} ms/step | ETA {eta_h:.1f}h")
+              f"LR {lr:.2e} | {ms_per_step:.0f} ms/step | ETA {eta_h:.1f}h"
+              + (f" | halt={halt_probs[-1].item():.2f}" if halt_probs else ""))
         window_start = time.time()
-        window_loss = 0.0""")
+        window_loss = 0.0
 
-code("""    # 8. Save (local)
+    # 8. Save (local)
     if step % SAVE_LOCAL == 0:
         save_checkpoint(step, to_drive=False)
 
@@ -852,7 +915,7 @@ code("""    # 8. Save (local)
         probe_results['step'] = step
         probe_results['R'] = R
         probe_log.append(probe_results)
-        
+
         # Print results
         if 'iter_from_content' in probe_results:
             ifc = probe_results['iter_from_content']
@@ -878,7 +941,8 @@ code("""    # 8. Save (local)
 
 total_time = time.time() - run_start
 print("=" * 70)
-print(f"✅ Training complete! {total_time/3600:.1f} hours, best loss: {best_loss:.4f}")""")
+print(f"✅ Training complete! {total_time/3600:.1f} hours, best loss: {best_loss:.4f}")"""
+)
 
 # ═══════════════════════════════════════════════════════
 # Save, Final Eval, Visualization
@@ -904,7 +968,7 @@ ternary_count = sum(v['weight_ternary'].numel() for v in ternary_weights.values(
 print(f"📦 Ternary export → {export_path} ({ternary_count:,} params)")
 
 config_path = os.path.join(DRIVE_CKPT_DIR, 'config.json')
-with open(config_path, 'w') as f:
+with open(config_path, 'w', encoding="utf-8") as f:
     json.dump(asdict(config), f, indent=2)
 print(f"📋 Config → {config_path}")""")
 
@@ -917,11 +981,13 @@ for test_R in range(1, config.max_recurrence + 1):
     print(f"  R={test_R}: Loss={result['loss']:.4f}, Perplexity={result['perplexity']:.2f}")
 print("\\n(Lower R = faster inference, higher R = better quality)")""")
 
-md("""## 15. Visualization — Training + Subspace Probes
+md(
+    """## 15. Visualization — Training + Subspace Probes
 
 The bottom two panels are the key evidence for the paper:
 - **Iteration probe from content dims**: Should be NEAR CHANCE for SPR (orthogonality preserved)
-- **Token probe from context dims**: Should be NEAR CHANCE for SPR (no content leakage)""")
+- **Token probe from context dims**: Should be NEAR CHANCE for SPR (no content leakage)"""
+)
 
 code("""import matplotlib.pyplot as plt
 
@@ -953,7 +1019,7 @@ if probe_log:
     ifc_vals = [p['iter_from_content'] for p in probe_log if 'iter_from_content' in p]
     ifx_vals = [p['iter_from_context'] for p in probe_log if 'iter_from_context' in p]
     chance_vals = [p['iter_from_content_chance'] for p in probe_log if 'iter_from_content_chance' in p]
-    
+
     axes[2].plot(steps_p, ifc_vals, 'o-', color='crimson', linewidth=2, markersize=5, label='Iter from CONTENT (should be LOW)')
     axes[2].plot(steps_p, ifx_vals, 's-', color='forestgreen', linewidth=2, markersize=5, label='Iter from CONTEXT (should be HIGH)')
     if chance_vals:
@@ -970,7 +1036,7 @@ if probe_log and any('token_from_content' in p for p in probe_log):
     steps_t = [p['step'] for p in probe_log if 'token_from_content' in p]
     tfc_vals = [p['token_from_content'] for p in probe_log if 'token_from_content' in p]
     tfx_vals = [p['token_from_context'] for p in probe_log if 'token_from_context' in p]
-    
+
     axes[3].plot(steps_t, tfc_vals, 'o-', color='forestgreen', linewidth=2, markersize=5, label='Token from CONTENT (should be HIGH)')
     axes[3].plot(steps_t, tfx_vals, 's-', color='crimson', linewidth=2, markersize=5, label='Token from CONTEXT (should be LOW)')
     axes[3].axhline(y=0.01, color='gray', linestyle='--', alpha=0.7, label='Chance (0.01)')
@@ -1007,7 +1073,7 @@ code("""if probe_log:
         tfx = p.get('token_from_context', float('nan'))
         print(f"{p['step']:>8,} {p['R']:>3} {ifc:>14.4f} {ifx:>14.4f} {tfc:>14.4f} {tfx:>14.4f}")
     print("-" * 70)
-    
+
     # Summary interpretation
     last = probe_log[-1]
     if 'iter_from_content' in last and 'iter_from_context' in last:
@@ -1033,10 +1099,10 @@ code("""if probe_log:
             print(f"   Separation gap: {separation:.4f}")
             print(f"   Subspace partition may need stronger enforcement.")
             print(f"   Ablations: (1) spr_isolated_norm=True, (2) different ratios.")
-    
+
     # Save probe log
     probe_path = os.path.join(DRIVE_CKPT_DIR, 'probe_results.json')
-    with open(probe_path, 'w') as f:
+    with open(probe_path, 'w', encoding="utf-8") as f:
         json.dump(probe_log, f, indent=2)
     print(f"\\n📋 Probe results → {probe_path}")
 else:
@@ -1053,22 +1119,20 @@ notebook = {
         "kernelspec": {
             "display_name": "Python 3",
             "language": "python",
-            "name": "python3"
+            "name": "python3",
         },
-        "language_info": {
-            "name": "python",
-            "version": "3.10.0"
-        }
+        "language_info": {"name": "python", "version": "3.10.0"},
     },
     "nbformat": 4,
-    "nbformat_minor": 5
+    "nbformat_minor": 5,
 }
 
 output_path = "/home/ty/Repositories/ai_workspace/recurrent_bitnet/notebooks/RecurrentBitNet_V2_SPR.ipynb"
-with open(output_path, "w") as f:
+with open(output_path, "w", encoding="utf-8") as f:
     json.dump(notebook, f, indent=1)
 
 print(f"✅ Notebook generated: {output_path}")
-print(f"   {len(cells)} cells ({sum(1 for c in cells if c['cell_type']=='code')} code, "
-      f"{sum(1 for c in cells if c['cell_type']=='markdown')} markdown)")
-
+print(
+    f"   {len(cells)} cells ({sum(1 for c in cells if c['cell_type']=='code')} code, "
+    f"{sum(1 for c in cells if c['cell_type']=='markdown')} markdown)"
+)
