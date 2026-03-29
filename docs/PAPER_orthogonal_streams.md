@@ -209,6 +209,8 @@ x_bind = x_bind + binding_network(binding_input)
 
 The binding network is deliberately small — it should capture coarse content×context interactions (e.g., "mathematical content + iteration 3 → engage precise computation") without creating the fine-grained entanglement that standard residual streams produce.
 
+Critically, the binding network's output is gated by a **maturity parameter** — a learned scalar initialized at sigmoid(-3) ≈ 0.047, making the conjunctive subspace nearly silent at initialization. This mirrors the biological developmental gradient of silent synapses in the hippocampus, where NMDARs actively suppress AMPAR recruitment until sufficient coincident activity triggers unsilencing (Kerchner & Nicoll, 2008; Adesnik et al., 2008). Without this gate, early training noise during the R=1 curriculum phase — when no iteration context exists to bind against — can cause the binding network to latch onto spurious content×context correlations, establishing premature conjunctive representations that resist later correction. The maturity gate opens gradually as sustained gradient pressure during R≥2 training drives the parameter positive, ensuring that conjunctive binding emerges only after the content and context subspaces have stabilized.
+
 ### 5.6 How Interaction Happens: Attention as Co-Activation
 
 A critical design property: **standard multi-head attention naturally implements the co-activation mechanism** without architectural modification. When computing Q, K, V from the full d_model representation, attention heads can learn to:
@@ -400,6 +402,8 @@ We release this synthesis as a preprint to accelerate community validation and r
 
 **[Francés et al., 2026]** Francés, R., Comyn, T., Desnous, C., Bettoni, F., Pavlowsky, A., Preat, T. & Plaçais, P.-Y. (2026). Aversive learning hijacks a brain sugar sensor to consolidate memory. *Nature*. https://doi.org/10.1038/s41586-026-10306-z
 
+**[Kerchner & Nicoll, 2008]** Kerchner, G.A. & Nicoll, R.A. (2008). Silent synapses and the emergence of a postsynaptic mechanism for LTP. *Nature Reviews Neuroscience*, 9(11), 813. https://doi.org/10.1038/nrn2501
+
 **[Liu et al., 2023]** Liu, N.F., Lin, K., Hewitt, J., Paranjape, A., Bevilacqua, M., Petroni, F. & Liang, P. (2023). Lost in the Middle: How Language Models Use Long Contexts. *arXiv:2307.03172*.
 
 **[Ng, 2026]** Ng, D.N. (2026). LLM Neuroanatomy: How I Topped the LLM Leaderboard Without Changing a Single Weight. https://dnhkng.github.io/posts/rys/
@@ -462,6 +466,10 @@ class SubspacePartitionedReasoningCore(nn.Module):
         nn.init.zeros_(self.binding_net[-1].weight)
         nn.init.zeros_(self.binding_net[-1].bias)
         
+        # Maturity gate (silent synapse analog)
+        # sigmoid(-3) ≈ 0.047 — nearly silent at init, opens with training
+        self.maturity_gate = nn.Parameter(torch.tensor(-3.0))
+        
         # Conjunctive halt scorer (Drosophila AND gate analog)
         # Reads ONLY from the conjunctive subspace — the sole location where
         # content quality AND context state have been jointly represented.
@@ -501,7 +509,8 @@ class SubspacePartitionedReasoningCore(nn.Module):
             
             # 2. Compute conjunctive binding from content + context
             binding_input = torch.cat([x_content, x_context], dim=-1)
-            x_bind = x_bind + self.binding_net(binding_input)
+            maturity = torch.sigmoid(self.maturity_gate)
+            x_bind = x_bind + maturity * self.binding_net(binding_input)
             
             # 3. Reassemble full representation
             x = torch.cat([x_content, x_context, x_bind], dim=-1)

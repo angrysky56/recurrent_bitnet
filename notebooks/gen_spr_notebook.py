@@ -343,6 +343,17 @@ class SPRReasoningCore(nn.Module):
         nn.init.zeros_(self.binding_net[-1].weight)
         nn.init.zeros_(self.binding_net[-1].bias)
 
+        # --- MATURITY GATE (Silent Synapse Analog) ---
+        # Biological basis: In the developing hippocampus, NMDARs actively
+        # SUPPRESS AMPAR recruitment until sufficient coincident activity occurs.
+        # (Adesnik et al. 2008; Kerchner & Nicoll, Nat Rev Neurosci 2008)
+        # Without this gate, the binding network can latch onto spurious
+        # content×context correlations during early R=1 training before the
+        # content and context subspaces have established stable representations.
+        # sigmoid(-3.0) ≈ 0.047 at init — nearly silent. Opens only under
+        # sustained gradient pressure during R≥2 curriculum phases.
+        self.maturity_gate = nn.Parameter(torch.tensor(-3.0))
+
         # --- CONJUNCTIVE HALT SCORER (The Drosophila AND Gate) ---
         # Reads ONLY from the conjunctive subspace — the sole location where
         # content quality AND context state have been jointly represented.
@@ -380,9 +391,10 @@ class SPRReasoningCore(nn.Module):
             if r < self.iteration_embeddings.size(0):
                 x_context = x_context + self.iteration_embeddings[r]
 
-            # 2. Conjunctive binding: small network reads both, writes to bind dims
+            # 2. Conjunctive binding: gated by maturity (silent synapse analog)
             binding_input = torch.cat([x_content, x_context], dim=-1)
-            x_bind = x_bind + self.binding_net(binding_input)
+            maturity = torch.sigmoid(self.maturity_gate)  # ~0.05 at init, grows with training
+            x_bind = x_bind + maturity * self.binding_net(binding_input)
 
             # 3. Reassemble (content dims NEVER saw the iteration embedding)
             x = torch.cat([x_content, x_context, x_bind], dim=-1)
@@ -487,7 +499,10 @@ print(f"   Binding net:     {binding_params:,} params ({binding_params/num_param
 print(f"   Effective depth: {eff_depth} layers (R={config.max_recurrence})")
 print(f"   Subspace split:  content={d_content} ({d_content/config.d_model*100:.0f}%) | "
       f"context={d_context} ({d_context/config.d_model*100:.0f}%) | "
-      f"conjunctive={d_conj} ({d_conj/config.d_model*100:.0f}%)")""")
+      f"conjunctive={d_conj} ({d_conj/config.d_model*100:.0f}%)")
+if hasattr(model.reasoning_core, 'maturity_gate'):
+    mg = torch.sigmoid(model.reasoning_core.maturity_gate).item()
+    print(f"   Maturity gate:   {mg:.4f} (silent synapse — opens during training)")""")
 
 # ═══════════════════════════════════════════════════════
 # CELL 8-9: Training config + Data pipeline (identical to V2)
@@ -649,7 +664,8 @@ def run_subspace_probes(model, num_batches=20, R=None):
                 if r < core.iteration_embeddings.size(0):
                     x_ctx = x_ctx + core.iteration_embeddings[r]
                 binding_in = torch.cat([x_cont, x_ctx], dim=-1)
-                x_bind = x_bind + core.binding_net(binding_in)
+                maturity = torch.sigmoid(core.maturity_gate) if hasattr(core, 'maturity_gate') else 1.0
+                x_bind = x_bind + maturity * core.binding_net(binding_in)
                 x = torch.cat([x_cont, x_ctx, x_bind], dim=-1)
             else:
                 # Baseline path
@@ -889,7 +905,9 @@ for step in range(start_step + 1, TOTAL_STEPS + 1):
         eta_h = remaining / 3600
         print(f"Step {step:>7,}/{TOTAL_STEPS:,} | Loss {avg_loss:.4f} | R={R} | "
               f"LR {lr:.2e} | {ms_per_step:.0f} ms/step | ETA {eta_h:.1f}h"
-              + (f" | halt={halt_probs[-1].item():.2f}" if halt_probs else ""))
+              + (f" | halt={halt_probs[-1].item():.2f}" if halt_probs else "")
+              + (f" | maturity={torch.sigmoid(model.reasoning_core.maturity_gate).item():.3f}"
+                 if hasattr(model.reasoning_core, 'maturity_gate') else ""))
         window_start = time.time()
         window_loss = 0.0
 
