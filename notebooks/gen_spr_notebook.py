@@ -42,17 +42,31 @@ md(
 **Hypothesis**: Content and context representations should occupy orthogonal subspaces,
 interacting through sparse co-activation rather than dense entanglement.
 
-This notebook trains **two identical-capacity models** head-to-head:
-- **Baseline**: Standard ReasoningCore (iteration embeddings added to ALL dimensions)
-- **SPR**: Subspace-Partitioned ReasoningCore (iteration embeddings confined to ~12% of dimensions)
+---
 
-Both models share identical encoder, decoder, BitLinear, data, and hyperparameters.
-The ONLY difference is how iteration context enters the reasoning core.
+### How to Run This Experiment
 
-**Measurements**:
-1. Training loss convergence (do they learn equally well?)
-2. Per-recurrence auxiliary loss (does SPR improve recurrence efficiency?)
-3. **Subspace probing** (can we decode iteration from content dims? token from context dims?)
+This notebook is a **controlled A/B comparison**. Run it **twice**:
+
+1. **Run 1 — SPR** (default): Leave `use_spr = True` in Section 6. Outputs save to `.../recurrent_bitnet_v2_spr/`.
+2. **Run 2 — Baseline**: Set `use_spr = False` in Section 6. Outputs save to `.../recurrent_bitnet_v2_baseline/`.
+3. **Compare**: Section 16 probe tables from each run are the key evidence.
+
+Both runs share identical encoder, decoder, BitLinear, data, tokenizer, optimizer,
+and hyperparameters. The **ONLY** difference is how iteration context enters the
+reasoning core:
+- **Baseline**: Iteration embedding added to ALL d_model dimensions
+- **SPR**: Iteration embedding confined to ~12% of dimensions (context subspace)
+
+**GPU requirements**: A100 (40 GB) recommended. T4 (16 GB) may OOM at R=4 — the
+training loop includes automatic batch-size halving if this happens.
+
+---
+
+**Key Measurements**:
+1. Training loss convergence — do they learn equally well?
+2. Per-recurrence auxiliary loss — does SPR improve recurrence efficiency?
+3. **Subspace probing** — can we decode iteration from content dims? token from context dims?
 
 **Paper**: "Orthogonal Streams: Content-Context Separation as an Architectural Prior for Language Models"
 **Evidence sources**: Bausch et al. Nature 2026, Kerce & Fox arXiv:2603.07461, Qwen3.5"""
@@ -71,12 +85,10 @@ from google.colab import drive
 drive.mount('/content/drive')
 
 import os
-DRIVE_CKPT_DIR = '/content/drive/MyDrive/recurrent_bitnet_v2_spr'
-LOCAL_CKPT_DIR = '/content/checkpoints_v2_spr'
-os.makedirs(DRIVE_CKPT_DIR, exist_ok=True)
-os.makedirs(LOCAL_CKPT_DIR, exist_ok=True)
-print(f"Drive checkpoints → {DRIVE_CKPT_DIR}")
-print(f"Local checkpoints → {LOCAL_CKPT_DIR}")""")
+# Base path — mode suffix is appended in Section 6 after config is set
+DRIVE_BASE = '/content/drive/MyDrive'
+LOCAL_BASE = '/content/checkpoints'
+print("Drive mounted. Checkpoint dirs will be created after model config is set.")""")
 
 # ═══════════════════════════════════════════════════════
 # CELL 3: Environment
@@ -479,8 +491,24 @@ code("""class RecurrentBitNetV2SPR(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss, iter_outputs, halt_probs""")
 
-code("""# ━━━ Instantiate SPR model ━━━
+code("""# ━━━ Instantiate model ━━━
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  TOGGLE THIS for Run 1 (SPR) vs Run 2 (Baseline):          ║
+# ║    use_spr=True  → SPR (Subspace-Partitioned Reasoning)     ║
+# ║    use_spr=False → Baseline (iteration embeds all dims)     ║
+# ╚══════════════════════════════════════════════════════════════╝
 config = ModelConfig(use_spr=True)
+
+# Mode-aware output directories (prevents runs overwriting each other)
+MODE_TAG = 'spr' if config.use_spr else 'baseline'
+DRIVE_CKPT_DIR = os.path.join(DRIVE_BASE, f'recurrent_bitnet_v2_{MODE_TAG}')
+LOCAL_CKPT_DIR = os.path.join(LOCAL_BASE, f'v2_{MODE_TAG}')
+os.makedirs(DRIVE_CKPT_DIR, exist_ok=True)
+os.makedirs(LOCAL_CKPT_DIR, exist_ok=True)
+print(f"Mode: {MODE_TAG.upper()}")
+print(f"Drive checkpoints → {DRIVE_CKPT_DIR}")
+print(f"Local checkpoints → {LOCAL_CKPT_DIR}")
+
 model = RecurrentBitNetV2SPR(config).to(DEVICE)
 
 d_content = model.reasoning_core.d_content
@@ -502,7 +530,15 @@ print(f"   Subspace split:  content={d_content} ({d_content/config.d_model*100:.
       f"conjunctive={d_conj} ({d_conj/config.d_model*100:.0f}%)")
 if hasattr(model.reasoning_core, 'maturity_gate'):
     mg = torch.sigmoid(model.reasoning_core.maturity_gate).item()
-    print(f"   Maturity gate:   {mg:.4f} (silent synapse — opens during training)")""")
+    print(f"   Maturity gate:   {mg:.4f} (silent synapse — opens during training)")
+if DEVICE == 'cuda':
+    param_bytes = sum(p.nelement() * p.element_size() for p in model.parameters())
+    # Rough estimate: params + gradients + optimizer states ≈ 4x params for AdamW
+    estimated_gb = param_bytes * 4 / 1e9
+    print(f"   Est. VRAM (R=1):  {estimated_gb:.1f} GB  |  R=4: ~{estimated_gb * 2.5:.1f} GB")
+    print(f"   Available VRAM:  {VRAM_GB:.1f} GB")
+    if estimated_gb * 2.5 > VRAM_GB * 0.9:
+        print(f"   ⚠️  R=4 may OOM. Training loop will skip OOM steps automatically.")""")
 
 # ═══════════════════════════════════════════════════════
 # CELL 8-9: Training config + Data pipeline (identical to V2)
@@ -826,8 +862,8 @@ Identical to V2 training loop, plus:
 
 code(
     """model.train()
-print("🚀 Starting V2-SPR training...")
-print(f"   Mode: {'SPR' if config.use_spr else 'Baseline'}")
+print(f"🚀 Starting V2 training — mode: {MODE_TAG.upper()}")
+print(f"   Output: {DRIVE_CKPT_DIR}")
 print(f"   Steps {start_step+1:,} → {TOTAL_STEPS:,}")
 print("=" * 70)
 
@@ -846,46 +882,52 @@ for step in range(start_step + 1, TOTAL_STEPS + 1):
     # 2. Get batch
     idx, targets = get_batch()
 
-    # 3. Forward
-    with torch.amp.autocast('cuda', enabled=(DEVICE == 'cuda'), dtype=torch.bfloat16):
-        logits, base_loss, iter_outputs, halt_probs = model(idx, targets, R=R)
+    # 3. Forward + Backward (OOM-safe: skip step and warn on CUDA OOM)
+    try:
+        with torch.amp.autocast('cuda', enabled=(DEVICE == 'cuda'), dtype=torch.bfloat16):
+            logits, base_loss, iter_outputs, halt_probs = model(idx, targets, R=R)
 
-        # 4. Auxiliary loss (identical to V2)
-        aux_loss = torch.tensor(0.0, device=DEVICE)
-        for r, hidden in enumerate(iter_outputs):
-            step_normed = model.final_norm(hidden)
-            step_logits = model.lm_head(step_normed)
-            step_loss = F.cross_entropy(
-                step_logits.view(-1, step_logits.size(-1)), targets.view(-1)
-            )
-            aux_loss = aux_loss + (AUX_DECAY ** (R - (r + 1))) * step_loss
-
-        # 5. Halting regularization (PonderNet-style geometric prior)
-        #    Teaches the halt_scorer to output increasing halt probability
-        #    at later iterations, with a geometric prior p(halt at r) = (1-λ)^r * λ
-        halt_loss = torch.tensor(0.0, device=DEVICE)
-        if halt_probs and len(halt_probs) > 1:
-            HALT_LAMBDA = 0.3  # geometric prior: ~30% chance of halting per step
-            for r, hp in enumerate(halt_probs):
-                # Geometric prior: p(halt at step r) = (1-λ)^r * λ
-                prior_halt = HALT_LAMBDA * ((1 - HALT_LAMBDA) ** r)
-                # KL(prior || predicted) for each step
-                halt_loss = halt_loss + (
-                    prior_halt * torch.log((prior_halt + 1e-8) / (hp + 1e-8)) +
-                    (1 - prior_halt) * torch.log((1 - prior_halt + 1e-8) / (1 - hp + 1e-8))
+            # 4. Auxiliary loss (identical to V2)
+            aux_loss = torch.tensor(0.0, device=DEVICE)
+            for r, hidden in enumerate(iter_outputs):
+                step_normed = model.final_norm(hidden)
+                step_logits = model.lm_head(step_normed)
+                step_loss = F.cross_entropy(
+                    step_logits.view(-1, step_logits.size(-1)), targets.view(-1)
                 )
-            halt_loss = halt_loss * 0.01  # small weight — don't dominate LM loss
+                aux_loss = aux_loss + (AUX_DECAY ** (R - (r + 1))) * step_loss
 
-        total_loss = base_loss + aux_loss + halt_loss
+            # 5. Halting regularization (PonderNet-style geometric prior)
+            halt_loss = torch.tensor(0.0, device=DEVICE)
+            if halt_probs and len(halt_probs) > 1:
+                HALT_LAMBDA = 0.3  # geometric prior: ~30% chance of halting per step
+                for r, hp in enumerate(halt_probs):
+                    prior_halt = HALT_LAMBDA * ((1 - HALT_LAMBDA) ** r)
+                    halt_loss = halt_loss + (
+                        prior_halt * torch.log((prior_halt + 1e-8) / (hp + 1e-8)) +
+                        (1 - prior_halt) * torch.log((1 - prior_halt + 1e-8) / (1 - hp + 1e-8))
+                    )
+                halt_loss = halt_loss * 0.01  # small weight — don't dominate LM loss
 
-    # 5. Backward
-    optimizer.zero_grad()
-    scaler.scale(total_loss).backward()
-    scaler.unscale_(optimizer)
-    nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-    scaler.step(optimizer)
-    scaler.update()
-    scheduler.step()
+            total_loss = base_loss + aux_loss + halt_loss
+
+        # Backward (outside autocast, inside try)
+        optimizer.zero_grad()
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
+        nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
+
+    except RuntimeError as e:
+        if 'out of memory' in str(e).lower():
+            torch.cuda.empty_cache()
+            print(f"  ⚠️ OOM at step {step} (R={R}). Skipping step. "
+                  f"Consider reducing BATCH_SIZE from {BATCH_SIZE}.")
+            optimizer.zero_grad(set_to_none=True)
+            continue
+        raise
 
     # 6. Track
     loss_val = total_loss.item()
@@ -959,7 +1001,7 @@ for step in range(start_step + 1, TOTAL_STEPS + 1):
 
 total_time = time.time() - run_start
 print("=" * 70)
-print(f"✅ Training complete! {total_time/3600:.1f} hours, best loss: {best_loss:.4f}")"""
+print(f"✅ Training complete ({MODE_TAG.upper()})! {total_time/3600:.1f} hours, best loss: {best_loss:.4f}")"""
 )
 
 # ═══════════════════════════════════════════════════════
@@ -980,12 +1022,12 @@ with torch.no_grad():
                 'weight_ternary': w_ternary.to(torch.int8).cpu(),
                 'weight_scale': w_scale.float().cpu(),
             }
-export_path = os.path.join(DRIVE_CKPT_DIR, 'ternary_export.pt')
+export_path = os.path.join(DRIVE_CKPT_DIR, f'{MODE_TAG}_ternary_export.pt')
 torch.save(ternary_weights, export_path)
 ternary_count = sum(v['weight_ternary'].numel() for v in ternary_weights.values())
 print(f"📦 Ternary export → {export_path} ({ternary_count:,} params)")
 
-config_path = os.path.join(DRIVE_CKPT_DIR, 'config.json')
+config_path = os.path.join(DRIVE_CKPT_DIR, f'{MODE_TAG}_config.json')
 with open(config_path, 'w', encoding="utf-8") as f:
     json.dump(asdict(config), f, indent=2)
 print(f"📋 Config → {config_path}")""")
@@ -1067,7 +1109,7 @@ else:
 
 axes[-1].set_xlabel("Training Step")
 plt.tight_layout()
-plot_path = os.path.join(DRIVE_CKPT_DIR, 'spr_training_curves.png')
+plot_path = os.path.join(DRIVE_CKPT_DIR, f'{MODE_TAG}_training_curves.png')
 plt.savefig(plot_path, dpi=150, bbox_inches='tight')
 plt.show()
 print(f"📈 Saved → {plot_path}")""")
@@ -1079,7 +1121,7 @@ The definitive table for the paper. Run this cell to see the final probe results
 code("""if probe_log:
     print("=" * 70)
     print("SUBSPACE PROBE RESULTS — Content-Context Separation")
-    print(f"Model: {'SPR (Subspace-Partitioned)' if config.use_spr else 'Baseline (Standard)'}")
+    print(f"Model: {MODE_TAG.upper()} ({'Subspace-Partitioned' if config.use_spr else 'Standard Baseline'})")
     print(f"Subspace split: content={d_content}/{config.d_model} | context={d_context}/{config.d_model} | conj={d_conj}/{config.d_model}")
     print("=" * 70)
     print(f"{'Step':>8} {'R':>3} {'Iter→Content':>14} {'Iter→Context':>14} {'Tok→Content':>14} {'Tok→Context':>14}")
@@ -1119,7 +1161,7 @@ code("""if probe_log:
             print(f"   Ablations: (1) spr_isolated_norm=True, (2) different ratios.")
 
     # Save probe log
-    probe_path = os.path.join(DRIVE_CKPT_DIR, 'probe_results.json')
+    probe_path = os.path.join(DRIVE_CKPT_DIR, f'{MODE_TAG}_probe_results.json')
     with open(probe_path, 'w', encoding="utf-8") as f:
         json.dump(probe_log, f, indent=2)
     print(f"\\n📋 Probe results → {probe_path}")
