@@ -586,7 +586,7 @@ if DEVICE == 'cuda':
 # ═══════════════════════════════════════════════════════
 md("## 7. Training Configuration")
 
-code("""TOTAL_STEPS   = 500_000
+code("""TOTAL_STEPS   = 100_000
 BATCH_SIZE    = 8
 SEQ_LEN       = config.max_seq_len
 MAX_GRAD_NORM = 1.0
@@ -600,11 +600,13 @@ SAVE_LOCAL    = 5_000
 SAVE_DRIVE    = 25_000
 PROBE_EVERY   = 10_000
 
+# Curriculum: adjusted for 100K steps so all phases get probe coverage
+# For 200K+ runs, use: [(0,1), (50_000,2), (150_000,3), (300_000,4)]
 CURRICULUM = [
     (0,       1),
-    (50_000,  2),
-    (150_000, 3),
-    (300_000, 4),
+    (25_000,  2),
+    (60_000,  3),
+    (85_000,  4),
 ]
 
 RESUME_FROM = None
