@@ -79,6 +79,34 @@ Furthermore, orthogonal coding enables *zero-shot generalization*: a content rep
 
 ---
 
+## 2.5 Neuroscience Evidence: "What" and "When" Separation in Prefrontal Cortex
+
+### 2.5.1 The Machens Experiment
+
+While Bausch et al. (2026) established the orthogonality of content and context in the medial temporal lobe, an earlier study by Machens, Romo & Brody (2010) demonstrated a closely related separation in prefrontal cortex — between *what* is held in working memory and *when* during the memory delay period.
+
+In their paradigm, monkeys held a vibratory stimulus frequency (f1) in short-term memory across a 3-second delay period. PFC neurons showed complex, heterogeneous responses mixing stimulus identity (f1 — "what") and elapsed time ("when") in ways that made individual neurons essentially uninterpretable. Using PCA followed by a novel Difference of Covariances (DOC) method, Machens et al. found that the population-level activity decomposed into exactly six components — three carrying time-dependent variance and three carrying stimulus-dependent variance — that were **almost perfectly separable**: ~96.3% of time variance occupied the first three dimensions, ~99.8% of stimulus variance occupied the last three.
+
+### 2.5.2 Key Findings Relevant to SPR
+
+**Asymmetric variance allocation**: Time components captured ~82% of total firing rate variance; stimulus components captured only ~18%. Despite the task requiring only stimulus memory (time was irrelevant to rewards), the PFC devoted the vast majority of representational capacity to temporal dynamics. This warns that in transformer reasoning, "when am I in this computation" may similarly dominate the representation unless architecturally constrained.
+
+**Separate drive mechanisms**: A linear dynamical model revealed that time components were driven by **external inputs** (constant drive integrated over time), while stimulus components were driven by **recurrent connectivity** with negligible external input. The mixing matrix A showed near-zero coupling between the two subspaces. This mechanistic separation has a direct architectural prediction: rescaling time requires only changing external drive strength (fast, one trial), while rescaling stimulus dynamics requires changing synaptic weights (slow, many trials). This was confirmed when the delay period was doubled from 3s to 6s — time components rescaled immediately, stimulus components adapted slowly.
+
+**Functional but not anatomical**: Individual neurons randomly mixed time and stimulus information — reconstruction coefficients followed a unimodal spherical distribution with no evidence of distinct cell clusters. The separation existed only at the population level, emerging through specific linear combinations of neuron activities. This matches the Bausch et al. finding and implies that the biological separation is not implemented by physical wiring but by the dynamical organization of shared circuits.
+
+### 2.5.3 Implications for Recurrent Reasoning Architectures
+
+The Machens findings refine our understanding of "context" in SPR. What we previously treated as a single context subspace actually contains two functionally distinct streams:
+
+1. **Temporal context ("when")**: Tracks position in the reasoning process — which iteration, how far along. Driven by external signals (iteration embeddings). Analogous to Machens' time components. Should adapt rapidly when the number of reasoning steps changes.
+
+2. **State context ("what" of reasoning)**: Accumulates the actual reasoning state through recurrent processing. Driven by internal connectivity with no external injection. Analogous to Machens' stimulus components. Should adapt slowly, requiring training to restructure.
+
+This decomposition generates a strong prediction that the original two-subspace SPR lacked: **if we split the context subspace into temporal and state components, we should observe that iteration number can be decoded from temporal dims but NOT from state dims, and conversely that accumulated reasoning state can be decoded from state dims but NOT from temporal dims** — mirroring the ~96%/~99.8% separation that Machens observed biologically.
+
+---
+
 ## 3. Engineering Evidence: Dual-Stream Transformers
 
 ### 3.1 The Problem: Representational Dissolution
@@ -159,18 +187,21 @@ SPR is particularly relevant for recurrent/iterative reasoning architectures (e.
 
 ### 5.2 Dimensional Allocation
 
-For a model with hidden dimension d_model, SPR partitions the representation into three contiguous subspaces:
+For a model with hidden dimension d_model, SPR partitions the representation into four contiguous subspaces:
 
 ```
-d_model = d_content + d_context + d_conjunctive
+d_model = d_content + d_temporal + d_state + d_conjunctive
 
-Where (following biological ratios):
+Where (following biological ratios from Bausch 2026 + Machens 2010):
   d_content      ≈ 0.85 × d_model    # Context-invariant content
-  d_context      ≈ 0.12 × d_model    # Content-invariant context
+  d_temporal     ≈ 0.06 × d_model    # "When" — externally driven temporal context
+  d_state        ≈ 0.06 × d_model    # "What" — recurrently driven reasoning state
   d_conjunctive  ≈ 0.03 × d_model    # Learned conjunctive binding
 ```
 
-For a 768-dimensional model: d_content = 652, d_context = 92, d_conjunctive = 24.
+For a 768-dimensional model: d_content = 652, d_temporal = 46, d_state = 46, d_conjunctive = 24.
+
+The split of the original context subspace into temporal and state halves follows directly from Machens et al. (2010): PFC working memory decomposes into time components (externally driven, ~82% of variance) and stimulus components (recurrently driven, ~18% of variance). These carry orthogonal variance sources maintained by distinct mechanisms — external input vs. recurrent connectivity — and should not share the same subspace dimensions.
 
 ### 5.3 Content Subspace (d_content)
 
@@ -182,28 +213,37 @@ x_content = x[:, :, :d_content]  # Unchanged by iteration signal
 
 Content dimensions are updated by transformer blocks normally (attention + FFN), but the iteration embedding has zero projection into this subspace. This preserves the "88% invariance" property from the biology.
 
-### 5.4 Context Subspace (d_context)
+### 5.4 Temporal Context Subspace (d_temporal) — "When"
 
-The context subspace encodes computational state — what reasoning step we're on, what the model's current "goal" is. The iteration embedding writes exclusively here:
+The temporal context subspace tracks position in the reasoning chain. The iteration embedding writes exclusively here:
 
 ```python
-x_context = x[:, :, d_content:d_content+d_context]
-x_context = x_context + iteration_embedding[r]  # Only modifies context dims
+x_temporal = x[:, :, d_content:d_content+d_temporal]
+x_temporal = x_temporal + iteration_embedding[r]  # Only modifies temporal dims
 ```
 
-Context dimensions are also updated by transformer blocks, allowing the model to build complex context representations. But critically, the *injection* of external context (iteration signals) is confined to this subspace.
+This maps directly to Machens et al.'s time components: externally driven, acting as integrators of constant external input. Changing the number of reasoning iterations requires only changing the iteration embeddings (external drive strength) — a fast operation, analogous to Machens' prediction that time rescaling adapts within one or two trials.
+
+### 5.4b State Context Subspace (d_state) — "What" of Reasoning
+
+The state context subspace accumulates reasoning state through recurrent processing. It receives **no external injection** — no iteration embedding, no positional signal. It evolves purely through the recurrent dynamics of attention and FFN within those dimensions:
+
+```python
+x_state = x[:, :, d_content+d_temporal:d_content+d_temporal+d_state]
+# NO iteration embedding added. Gated to suppress noise during R=1 curriculum.
+x_state = x_state * sigmoid(state_gate)  # state_gate ≈ 0.12 at init
+```
+
+This maps to Machens et al.'s stimulus (f1) components: maintained by recurrent connectivity, with negligible external drive. The state gate (initialized at sigmoid(-2.0) ≈ 0.12, more open than the maturity gate) suppresses spurious state patterns during R=1 curriculum training when no recurrence exists, opening as the model enters R≥2 phases. Changing what the model reasons about (as opposed to how long it reasons) requires modifying the learned recurrent dynamics — a slow operation requiring training, analogous to Machens' prediction that stimulus rescaling adapts slowly over many trials.
 
 ### 5.5 Conjunctive Subspace (d_conjunctive)
 
-The conjunctive subspace is where content and context interact to form bound representations. This is analogous to the ~2.3% of hippocampal neurons that encode specific content×context combinations.
+The conjunctive subspace is where content, temporal context, and state context interact to form bound representations. This is analogous to the ~2.3% of hippocampal neurons that encode specific content×context combinations.
 
 ```python
-x_bind = x[:, :, d_content+d_context:]
-# A small learned network reads from both streams and writes here
-binding_input = torch.cat([
-    x_content.mean(dim=-1, keepdim=True).expand(..., d_conjunctive),
-    x_context.mean(dim=-1, keepdim=True).expand(..., d_conjunctive)
-], dim=-1)
+x_bind = x[:, :, d_content+d_temporal+d_state:]
+# A small learned network reads from all three streams and writes here
+binding_input = torch.cat([x_content, x_temporal, x_state], dim=-1)
 x_bind = x_bind + binding_network(binding_input)
 ```
 
@@ -228,11 +268,12 @@ The subspace partition does not prevent cross-stream attention — it prevents *
 | Standard residual stream | None — full entanglement | Dense mixing | 0 extra params |
 | FiLM conditioning | None — every dim modulated | Multiplicative modulation | 2 × d_model² |
 | Kerce & Fox dual-stream | Full — separate update paths | Combined readout | 2.5% perf loss |
-| SPR (proposed) | Partial — subspace partition | Attention across subspaces | ~0 extra params* |
+| SPR 3-subspace (v1) | Partial — content/context/conjunctive | Attention across subspaces | ~0 extra params |
+| SPR 4-subspace (v2) | Full — content/temporal/state/conjunctive | Attention + gated binding | ~0 extra params* |
 
-*SPR adds only the small conjunctive binding network (~74K params for d_model=768), which is <0.1% of a typical model.
+*SPR adds only the small conjunctive binding network (~74K params for d_model=768) plus two scalar gate parameters, which is <0.1% of a typical model.
 
-The key advantage of SPR over the Kerce & Fox approach is that SPR does not require separate update paths for attention and FFN. Standard transformer blocks operate over the full d_model as usual. The separation is enforced only at the *injection point* of external context (iteration embeddings), making SPR a minimal architectural modification that can be applied to any existing transformer.
+The key advantage of 4-subspace SPR over the 3-subspace variant is the Machens-derived separation within context: temporal dynamics (externally driven) and state dynamics (recurrently driven) are maintained by different mechanisms and should not share dimensions. This generates stronger testable predictions (Section 7) and enables the DOC diagnostic (Section 7.1b).
 
 ---
 
@@ -288,6 +329,16 @@ Train two matched models — a standard RecurrentBitNet V2 and an SPR variant �
 The cross-subspace probes (c, d) constitute the key test. In a standard model, both should be well above chance (entanglement). In SPR, both should show a **massive reduction** relative to the baseline — though not necessarily at chance, because standard multi-head attention computes Value projections across the full d_model, creating some cross-subspace information flow through the out-projection. This attention-mediated flow is the analog of biological co-activation and is *desirable* — the point is that the *injection* of iteration context is confined, not that attention is prevented from learning cross-subspace patterns. A baseline showing 80% iteration→content accuracy that drops to 15-25% under SPR (while maintaining or improving perplexity) constitutes strong evidence for the hypothesis.
 
 **Note on normalization coupling**: Standard RMSNorm normalizes by the root-mean-square of the *entire* d_model vector. This creates a subtle non-linear coupling between subspaces — a large activation spike in context dimensions will suppress content dimension magnitudes. If initial probes show more cross-subspace leakage than expected, a Subspace-Isolated RMSNorm (normalizing each subspace independently before concatenation) can be introduced as an ablation to quantify how much of the observed leakage is due to attention-mediated co-activation (desirable) versus normalization-mediated coupling (undesirable).
+
+### 7.1b DOC Diagnostic: Machens-Style Variance Decomposition
+
+Independent of the linear probing battery, we apply the Difference of Covariances (DOC) method from Machens et al. (2010) directly to the context subspace activations. For hidden states collected from temporal and state context dimensions across multiple iterations and token positions:
+
+1. Compute the covariance matrix of iteration-dependent variance: average the context activations per iteration r across tokens, compute Cov_iter from these iteration-conditional means.
+2. Compute the covariance matrix of token-dependent variance: average per token identity across iterations, compute Cov_tok from these token-conditional means.
+3. Compute the DOC matrix: S = Cov_iter - Cov_tok. Positive eigenvalues indicate dimensions dominated by iteration variance (temporal context); negative eigenvalues indicate dimensions dominated by token variance (state context).
+
+The DOC separation score — the fraction of total eigenvalue mass in positive eigenvalues — should be high (~0.8+) for SPR (indicating temporal dims carry iteration information and state dims carry token-derived reasoning state) and near 0.5 for the baseline (indicating no organized separation). This diagnostic requires no supervised labels beyond what the training data naturally provides and can be computed as a free byproduct of the probing pipeline.
 
 ### 7.2 Attention Head Specialization
 
@@ -368,13 +419,41 @@ If the content-context separation principle is validated, it suggests several co
 
 **Retrieval-augmented generation**: RAG systems retrieve content but inject it into an entangled stream. SPR suggests retrieved content should be injected into content dimensions while the *retrieval context* (relevance scores, source metadata, recency) should go to context dimensions.
 
+### 8.6 Applicability Beyond Recurrent Reasoning
+
+SPR is a minimal architectural modification — it constrains only *where external signals are injected*, not how attention or FFN operate. This makes it applicable to any transformer variant where distinct information streams can be identified:
+
+**Standard autoregressive transformers** (GPT, Llama, Mistral): The "context" is not iteration but positional encoding, system prompts, and instruction signals. SPR would confine positional encodings (RoPE, ALiBi) to temporal-context dimensions, system prompt representations to state-context dimensions, and leave content dimensions carrying pure token semantics. This is a drop-in modification to the embedding layer — no change to attention or FFN needed.
+
+**Hybrid linear-attention architectures** (Qwen3.5, Mamba, RWKV): DeltaNet layers accumulate context in recurrent state S_t. SPR would partition d_model within each layer — DeltaNet writes primarily to context subspace (temporal tracking of what's been seen), full attention reads primarily from content subspace (precise token retrieval). The 3:1 DeltaNet/attention layout naturally aligns with a 3:1 context-accumulation/content-retrieval ratio.
+
+**LoRA and parameter-efficient fine-tuning**: SPR informs *which dimensions to adapt*. Task-specific LoRA adapters should target context dimensions (changing the model's "reasoning mode") while freezing content dimensions (preserving token semantics). This predicts that LoRA applied only to context-subspace projections would achieve comparable task adaptation with fewer trainable parameters and less catastrophic forgetting, since content representations remain untouched.
+
+**Multi-agent and tool-use architectures**: When a model receives tool outputs or agent messages, these are currently injected into the same token stream as the model's own reasoning. SPR suggests tool outputs (content from external sources) should be injected into content dimensions, while tool metadata (which tool, confidence, freshness) should go to context dimensions.
+
+### 8.7 Scaling Predictions: Small Models Benefit Most
+
+We predict that SPR will show the **largest relative improvement in models under ~1B parameters**, with diminishing but still meaningful benefits at larger scales. The reasoning:
+
+**Capacity pressure**: In small models, every dimension is precious. Content-context entanglement wastes capacity because the model must simultaneously multiplex token semantics, positional information, and computational state in shared dimensions. SPR provides a free organizational prior that larger models *might* learn implicitly through sheer capacity — but small models cannot afford to discover through gradient descent alone.
+
+**The Machens warning**: In PFC recordings, temporal dynamics consumed ~82% of firing rate variance despite being irrelevant to the task (time was not rewarded). In a small transformer, if positional/temporal dynamics similarly eat the majority of representational capacity, there is almost no room left for actual content. SPR architecturally protects content capacity from temporal domination.
+
+**Superposition compounding**: Elhage et al. (2021) showed that transformers pack more features than dimensions via superposition. In small models, superposition is already at maximum utilization. Adding content-context entanglement on top of feature superposition creates a combinatorial explosion — the model must represent feature×context interactions in a space already saturated with feature×feature interactions. SPR reduces this to two separate, smaller superposition problems (one within content, one within context), each of which is more tractable.
+
+**The Kerce & Fox data point**: Their 2.5% cost of stream separation was measured at 29M parameters — a small model. The cost is bounded because separation removes destructive interference. At larger scales, standard transformers have enough capacity to absorb this interference without visible performance loss, but the interference still exists and manifests as the failure modes described in Section 6 (instruction drift, lost-in-the-middle, reasoning corruption).
+
+**Prediction at scale**: Above ~7B parameters, SPR's contribution to raw perplexity will be marginal (the model has enough capacity to self-organize). However, robustness benefits — instruction adherence over long conversations, positional retrieval flatness, reasoning chain recovery — should persist at all scales because these are structural properties of the representation, not capacity-limited properties.
+
+This generates a testable scaling law: train SPR and baseline models at 50M, 150M, 400M, 1B, and 3B parameters on identical data. Plot perplexity gap and robustness gap as functions of scale. Predict perplexity gap ∝ 1/√(params) (diminishing), robustness gap ∝ constant (persistent).
+
 ---
 
 ## 9. Conclusion
 
-We have identified a convergence across three independent research programs — human neuroscience, transformer architecture, and production language model engineering — pointing toward a single principle: **content and context representations should be maintained in approximately orthogonal subspaces**.
+We have identified a convergence across four independent research programs — human MTL neuroscience, primate PFC neurophysiology, transformer architecture, and production language model engineering — pointing toward a single principle: **content, temporal context, and reasoning state should be maintained in approximately orthogonal subspaces**.
 
-The human medial temporal lobe implements this through separate neuronal populations with sparse conjunctive binding. The Dual-Stream Transformer implements it through architecturally separated update paths. Qwen3.5 implements it (partially) through functionally distinct layer types. All three achieve strong performance while maintaining representational clarity.
+The human medial temporal lobe implements content-context separation through separate neuronal populations with sparse conjunctive binding (Bausch et al., 2026). The primate prefrontal cortex implements what-when separation through functionally orthogonal population dynamics maintained by distinct mechanisms — external drive for temporal tracking, recurrent connectivity for stimulus memory (Machens et al., 2010). The Dual-Stream Transformer implements separation through architecturally constrained update paths (Kerce & Fox, 2026). Qwen3.5 implements it through functionally distinct layer types (Qwen Team, 2026). All achieve strong performance while maintaining representational clarity.
 
 We propose Subspace-Partitioned Reasoning as a minimal architectural modification that captures this principle within standard transformer blocks, with dimensional allocations inspired by the biological ratios. The proposal generates concrete, testable predictions about probing accuracy, attention head specialization, and robustness to known failure modes.
 
@@ -386,9 +465,11 @@ We release this synthesis as a preprint to accelerate community validation and r
 
 ## References
 
-### Primary Sources (The Three Convergent Threads)
+### Primary Sources (The Four Convergent Threads)
 
 **[Bausch et al., 2026]** Bausch, M., Niediek, J., Reber, T.P., Mackay, S., Boström, J., Elger, C.E. & Mormann, F. (2026). Distinct neuronal populations in the human brain combine content and context. *Nature*, 650, 690–700. https://doi.org/10.1038/s41586-025-09910-2
+
+**[Machens et al., 2010]** Machens, C.K., Romo, R. & Brody, C.D. (2010). Functional, but not anatomical, separation of "what" and "when" in prefrontal cortex. *Journal of Neuroscience*, 30(1), 350–360. https://doi.org/10.1523/JNEUROSCI.3276-09.2010
 
 **[Kerce & Fox, 2026a]** Kerce, J.C. & Fox, A. (2026). The Dual-Stream Transformer: Channelized Architecture for Interpretable Language Modeling. *arXiv:2603.07461*.
 
@@ -429,19 +510,21 @@ class SubspacePartitionedReasoningCore(nn.Module):
     """
     Reasoning core with Subspace-Partitioned Reasoning (SPR).
     
-    Partitions d_model into three subspaces:
-    - Content (~85%): Never modified by iteration embeddings
-    - Context (~12%): Receives iteration embeddings
-    - Conjunctive (~3%): Learned binding between content and context
+    Partitions d_model into four subspaces (Bausch 2026 + Machens 2010):
+    - Content   (~85%): Never modified by iteration embeddings
+    - Temporal  (~6%):  Receives iteration embeddings (externally driven "when")
+    - State     (~6%):  Purely recurrent (no external injection — "what" of reasoning)
+    - Conjunctive (~3%): Learned binding between all three streams
     """
     
     def __init__(self, config):
         super().__init__()
         
-        # Subspace dimensions (derived from biological ratios)
+        # Four-subspace allocation
         self.d_content = int(config.d_model * 0.85)
-        self.d_context = int(config.d_model * 0.12)
-        self.d_conjunctive = config.d_model - self.d_content - self.d_context
+        self.d_temporal = int(config.d_model * 0.06)
+        self.d_state = int(config.d_model * 0.06)
+        self.d_conjunctive = config.d_model - self.d_content - self.d_temporal - self.d_state
 ```
 
 ```python
@@ -451,29 +534,31 @@ class SubspacePartitionedReasoningCore(nn.Module):
             for _ in range(config.reasoning_blocks)
         ])
         
-        # Iteration embeddings — ONLY d_context dimensions
+        # Iteration embeddings — ONLY temporal-context dims
+        # Machens: time components driven by external input
         self.iteration_embeddings = nn.Parameter(
-            torch.randn(config.max_recurrence, 1, 1, self.d_context) * 0.02
+            torch.randn(config.max_recurrence, 1, 1, self.d_temporal) * 0.02
         )
         
-        # Conjunctive binding network (small: ~2,304 params for d_model=768)
+        # Conjunctive binding: reads from all three streams
+        binding_in = self.d_content + self.d_temporal + self.d_state
         self.binding_net = nn.Sequential(
-            nn.Linear(self.d_content + self.d_context, self.d_conjunctive * 4),
+            nn.Linear(binding_in, self.d_conjunctive * 4),
             nn.GELU(),
             nn.Linear(self.d_conjunctive * 4, self.d_conjunctive),
         )
-        # Initialize near-zero so binding is learned gradually
         nn.init.zeros_(self.binding_net[-1].weight)
         nn.init.zeros_(self.binding_net[-1].bias)
         
-        # Maturity gate (silent synapse analog)
-        # sigmoid(-3) ≈ 0.047 — nearly silent at init, opens with training
+        # Maturity gate (silent synapse analog) — sigmoid(-3) ≈ 0.047
         self.maturity_gate = nn.Parameter(torch.tensor(-3.0))
         
-        # Conjunctive halt scorer (Drosophila AND gate analog)
-        # Reads ONLY from the conjunctive subspace — the sole location where
-        # content quality AND context state have been jointly represented.
-        # Prevents content-only or context-only signals from triggering halt.
+        # State gate (recurrent accumulation control) — sigmoid(-2) ≈ 0.12
+        # Machens: "what" components need recurrence to be meaningful;
+        # during R=1 curriculum there is nothing to accumulate.
+        self.state_gate = nn.Parameter(torch.tensor(-2.0))
+        
+        # Conjunctive halt scorer (AND gate on all three streams)
         self.halt_scorer = nn.Sequential(
             nn.Linear(self.d_conjunctive, self.d_conjunctive),
             nn.GELU(),
@@ -483,51 +568,52 @@ class SubspacePartitionedReasoningCore(nn.Module):
         nn.init.zeros_(self.halt_scorer[-2].weight)
         nn.init.zeros_(self.halt_scorer[-2].bias)
     
-    def forward(self, x, mask=None, R=None, recurrence_dropout=0.0):
+    def forward(self, x, mask=None, R=None):
         if R is None:
             R = self.iteration_embeddings.size(0)
         
-        iter_outputs = []
-        halt_probs = []
+        iter_outputs, halt_probs = [], []
+        maturity = torch.sigmoid(self.maturity_gate)
+        state_g = torch.sigmoid(self.state_gate)
 ```
 
 ```python
         for r in range(R):
-            if self.training and recurrence_dropout > 0 and r > 0:
-                if torch.rand(1).item() < recurrence_dropout:
-                    continue
+            # === FOUR-SUBSPACE PARTITIONING ===
+            c = self.d_content
+            t = c + self.d_temporal
+            s = t + self.d_state
+
+            x_content  = x[:, :, :c]      # ~85% — token semantics
+            x_temporal = x[:, :, c:t]      # ~6%  — "when" in reasoning
+            x_state    = x[:, :, t:s]      # ~6%  — "what" of reasoning
+            x_bind     = x[:, :, s:]       # ~3%  — conjunctive
             
-            # === SUBSPACE PARTITIONING ===
-            # Split representation into three subspaces
-            x_content = x[:, :, :self.d_content]                              # 85%
-            x_context = x[:, :, self.d_content:self.d_content+self.d_context] # 12%
-            x_bind    = x[:, :, self.d_content+self.d_context:]               # 3%
-            
-            # 1. Inject iteration context ONLY into context subspace
+            # 1. Inject iteration context ONLY into temporal subspace
             if r < self.iteration_embeddings.size(0):
-                x_context = x_context + self.iteration_embeddings[r]
+                x_temporal = x_temporal + self.iteration_embeddings[r]
             
-            # 2. Compute conjunctive binding from content + context
-            binding_input = torch.cat([x_content, x_context], dim=-1)
-            maturity = torch.sigmoid(self.maturity_gate)
+            # 2. Gate state subspace (no external injection — purely recurrent)
+            x_state = x_state * state_g
+            
+            # 3. Conjunctive binding from all three streams
+            binding_input = torch.cat([x_content, x_temporal, x_state], dim=-1)
             x_bind = x_bind + maturity * self.binding_net(binding_input)
             
-            # 3. Reassemble full representation
-            x = torch.cat([x_content, x_context, x_bind], dim=-1)
+            # 4. Reassemble
+            x = torch.cat([x_content, x_temporal, x_state, x_bind], dim=-1)
             
-            # 4. Standard transformer processing (attention sees ALL dims)
+            # 5. Standard transformer processing (attention sees ALL dims)
             for block in self.blocks:
                 x = block(x, mask)
             
             iter_outputs.append(x)
             
-            # 5. Conjunctive halt scoring (AND gate)
-            #    Reads ONLY from conjunctive dims — where content+context converge
-            x_conj = x[:, :, self.d_content+self.d_context:]
+            # 6. Conjunctive halt scoring (AND gate on all streams)
+            x_conj = x[:, :, s:]
             halt_prob = self.halt_scorer(x_conj).mean()
             halt_probs.append(halt_prob)
             
-            # During inference: halt when conjunctive state is confident
             if not self.training and halt_prob.item() > 0.8 and r > 0:
                 break
         
@@ -535,7 +621,7 @@ class SubspacePartitionedReasoningCore(nn.Module):
 ```
 
 
-**Implementation note**: After the transformer blocks process the full d_model representation, content and context dimensions may receive cross-subspace information through attention. This is *intentional* — it mirrors the biological co-activation mechanism. The key invariant is that the *injection* of external context (iteration embeddings) is confined to context dimensions. The transformer's own learned cross-subspace communication through attention heads is the analog of the entorhinal→hippocampal STDP associations.
+**Implementation note**: After the transformer blocks process the full d_model representation, all four subspaces may receive cross-subspace information through attention. This is *intentional* — it mirrors the biological co-activation mechanism. The key invariants are: (1) external context injection (iteration embeddings) is confined to temporal dims; (2) state dims receive *no* external injection, evolving purely through recurrent dynamics; (3) the halt decision reads only from the conjunctive subspace where all three streams converge. The transformer's own learned cross-subspace communication through attention heads is the analog of the entorhinal→hippocampal STDP associations.
 
 The critical test of whether SPR is working is not whether content and context dimensions remain perfectly orthogonal after transformer processing — it is whether linear probes can decode iteration number from content dimensions. If they cannot (or can only weakly), the partition is doing its job even if attention heads create some cross-subspace flow.
 

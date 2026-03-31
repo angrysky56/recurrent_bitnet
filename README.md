@@ -249,6 +249,7 @@ recurrent_bitnet/
 ├── .gitignore
 ├── docs/
 │   ├── DESIGN.md             # Architecture design rationale (v2 backlog)
+│   ├── PAPER_orthogonal_streams.md  # SPR paper — 4 convergent evidence streams
 │   ├── TRAINING_STRATEGY.md  # Detailed training plan
 │   ├── V3_QWEN35.md          # Qwen3.5-specific analysis
 │   └── rys_analysis.md       # RYS neuroanatomy deep-dive
@@ -258,7 +259,8 @@ recurrent_bitnet/
 │   ├── surgery.py             # Qwen3.5 → BitLinear conversion
 │   └── distill.py             # Distillation training loop
 └── notebooks/
-    └── RecurrentBitNet.ipynb   # Complete Colab experiment notebook
+    ├── gen_spr_notebook.py    # Generator for SPR experiment notebook
+    └── RecurrentBitNet_V2_SPR.ipynb  # 4-subspace SPR vs baseline A/B experiment
 ```
 
 ## Hardware Requirements
@@ -284,6 +286,9 @@ recurrent_bitnet/
 ### Interpretability & Structure
 6. **RYS / LLM Neuroanatomy**: David Noel Ng, "How I Topped the LLM Leaderboard Without Changing a Single Weight" (2026) — [dnhkng.github.io/posts/rys](https://dnhkng.github.io/posts/rys/)
 7. **On the Biology of a Large Language Model**: Lindsey, Gurnee et al. (Anthropic, 2025) — [transformer-circuits.pub](https://transformer-circuits.pub/2025/attribution-graphs/biology.html)
+8. **Content-Context Orthogonality in Human MTL**: Bausch et al., "Distinct neuronal populations in the human brain combine content and context" (Nature, 2026) — [doi:10.1038/s41586-025-09910-2](https://doi.org/10.1038/s41586-025-09910-2)
+9. **What-When Separation in PFC**: Machens, Romo & Brody, "Functional, but not anatomical, separation of 'what' and 'when' in prefrontal cortex" (J Neurosci, 2010) — [doi:10.1523/JNEUROSCI.3276-09.2010](https://doi.org/10.1523/JNEUROSCI.3276-09.2010)
+10. **Dual-Stream Transformer**: Kerce & Fox, "The Dual-Stream Transformer" (2026) — [arXiv:2603.07461](https://arxiv.org/abs/2603.07461)
 
 8. **Transformer Dynamics**: Fernando & Guitchounts, "A neuroscientific approach to interpretability" (2025) — [arXiv:2502.12131](https://arxiv.org/abs/2502.12131)
 9. **Statistical Physics of LM Reasoning**: Carson & Reisizadeh (MIT, 2025) — [arXiv:2506.04374](https://arxiv.org/abs/2506.04374)
